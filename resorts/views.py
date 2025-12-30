@@ -2,6 +2,8 @@
 Views for the resorts app.
 """
 import json
+import time
+import logging
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET
@@ -10,6 +12,8 @@ from .models import Resort
 from .scraper import get_or_refresh_resorts
 from .geocoding import geocode_location
 from .distance import filter_resorts_by_distance
+
+logger = logging.getLogger(__name__)
 
 
 def _format_drive_time(hours: float) -> str:
@@ -42,6 +46,9 @@ def search_resorts(request):
         - radius: search radius in miles (default 100) - this is DRIVING distance
         - priority: 'snow' or 'distance' - which dimension to prioritize (default 'snow')
     """
+    timings = {}
+    total_start = time.time()
+    
     location = request.GET.get('location', '').strip()
     radius = int(request.GET.get('radius', 100))
     priority = request.GET.get('priority', 'snow')  # 'snow' or 'distance'
@@ -50,22 +57,32 @@ def search_resorts(request):
         return JsonResponse({'error': 'Location is required'}, status=400)
     
     # Geocode the location
+    t0 = time.time()
     coords = geocode_location(location)
+    timings['geocoding_ms'] = round((time.time() - t0) * 1000)
+    
     if not coords:
         return JsonResponse({'error': 'Could not find location. Try a different format.'}, status=400)
     
     user_lat, user_lng = coords
     
     # Get all resorts (from cache or fresh scrape)
+    t0 = time.time()
     resorts = get_or_refresh_resorts()
+    timings['get_resorts_ms'] = round((time.time() - t0) * 1000)
+    timings['total_resorts'] = len(resorts)
     
     # Filter by distance and get nearby resorts with priority-based ranking
+    t0 = time.time()
     nearby = filter_resorts_by_distance(resorts, user_lat, user_lng, radius, priority=priority)
+    timings['filter_distance_ms'] = round((time.time() - t0) * 1000)
+    timings['candidates_after_filter'] = len(nearby)
     
     # Take top 10
     top_resorts = nearby[:10]
     
     # Format response
+    t0 = time.time()
     results = []
     for resort_data in top_resorts:
         resort = resort_data['resort']
@@ -95,6 +112,12 @@ def search_resorts(request):
             'distance_score': round(resort_data.get('distance_score', 0) * 100),
             'overall_score': round(resort_data.get('combined_score', 0) * 100),
         })
+    timings['format_response_ms'] = round((time.time() - t0) * 1000)
+    
+    timings['total_ms'] = round((time.time() - total_start) * 1000)
+    
+    # Log timing breakdown
+    logger.info(f"Search timings: {timings}")
     
     return JsonResponse({
         'user_location': {
@@ -105,6 +128,7 @@ def search_resorts(request):
         'radius': radius,
         'count': len(results),
         'resorts': results,
+        'timings': timings,  # Include in response for debugging
     })
 
 

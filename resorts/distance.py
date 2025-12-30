@@ -3,7 +3,9 @@ Distance calculation utilities including Haversine formula and OSRM routing.
 """
 import logging
 import math
-from typing import List, Dict, Optional, Any
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Optional, Any, Tuple
 
 import requests
 
@@ -11,9 +13,15 @@ from .models import Resort
 
 logger = logging.getLogger(__name__)
 
+# Track OSRM call statistics for debugging
+_osrm_stats = {'calls': 0, 'total_time_ms': 0}
+
 # OSRM public demo server (for development/testing)
 # For production, consider self-hosting or using a paid service
 OSRM_URL = "https://router.project-osrm.org"
+
+# Max concurrent OSRM requests (be respectful to the public server)
+MAX_OSRM_WORKERS = 10
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -44,6 +52,100 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     return R * c
 
 
+def _fetch_driving_distances_parallel(
+    user_lat: float,
+    user_lng: float,
+    candidates: List[Resort]
+) -> List[Tuple[Resort, Optional[Dict[str, float]]]]:
+    """
+    Fetch driving distances for all candidates in parallel using ThreadPoolExecutor.
+    
+    Returns:
+        List of (resort, driving_info) tuples
+    """
+    results = []
+    
+    # Use a session for connection pooling
+    session = requests.Session()
+    
+    def fetch_one(resort: Resort) -> Tuple[Resort, Optional[Dict[str, float]]]:
+        """Fetch driving info for a single resort."""
+        driving_info = _get_driving_route_with_session(
+            session,
+            user_lat, user_lng,
+            resort.latitude, resort.longitude
+        )
+        return (resort, driving_info)
+    
+    # Execute all requests in parallel
+    with ThreadPoolExecutor(max_workers=MAX_OSRM_WORKERS) as executor:
+        futures = {executor.submit(fetch_one, resort): resort for resort in candidates}
+        
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                resort = futures[future]
+                logger.error(f"Error fetching route for {resort.name}: {e}")
+                results.append((resort, None))
+    
+    session.close()
+    return results
+
+
+def _get_driving_route_with_session(
+    session: requests.Session,
+    start_lat: float,
+    start_lng: float,
+    end_lat: float,
+    end_lng: float
+) -> Optional[Dict[str, float]]:
+    """
+    Get driving route from OSRM using a shared session.
+    """
+    global _osrm_stats
+    _osrm_stats['calls'] += 1
+    call_start = time.time()
+    
+    # OSRM expects coordinates as lng,lat
+    url = f"{OSRM_URL}/route/v1/driving/{start_lng},{start_lat};{end_lng},{end_lat}"
+    
+    params = {
+        'overview': 'false',
+    }
+    
+    try:
+        response = session.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        call_time = round((time.time() - call_start) * 1000)
+        _osrm_stats['total_time_ms'] += call_time
+        
+        data = response.json()
+        
+        if data.get('code') == 'Ok' and data.get('routes'):
+            route = data['routes'][0]
+            distance_miles = route['distance'] / 1609.344
+            duration_hours = route['duration'] / 3600
+            
+            return {
+                'distance_miles': round(distance_miles, 1),
+                'duration_hours': round(duration_hours, 2),
+            }
+        
+        return None
+        
+    except requests.RequestException as e:
+        call_time = round((time.time() - call_start) * 1000)
+        _osrm_stats['total_time_ms'] += call_time
+        logger.error(f"OSRM request failed: {e}")
+        return None
+    except (KeyError, ValueError, IndexError) as e:
+        logger.error(f"Error parsing OSRM response: {e}")
+        return None
+
+
 def filter_resorts_by_distance(
     resorts: List[Resort],
     user_lat: float,
@@ -68,6 +170,9 @@ def filter_resorts_by_distance(
     Returns:
         List of dicts with 'resort', driving info, and scores, sorted
     """
+    global _osrm_stats
+    _osrm_stats = {'calls': 0, 'total_time_ms': 0}
+    
     # First pass: use straight-line distance to pre-filter
     # (avoids making OSRM calls for resorts that are clearly too far)
     candidates = []
@@ -88,14 +193,16 @@ def filter_resorts_by_distance(
     if not candidates:
         return []
     
-    # Second pass: get actual driving distances
+    logger.info(f"OSRM: Pre-filter found {len(candidates)} candidates within {max_distance * 1.5:.0f}mi straight-line")
+    
+    # Second pass: get actual driving distances IN PARALLEL
     results = []
-    for resort in candidates:
-        driving_info = get_driving_route(
-            user_lat, user_lng,
-            resort.latitude, resort.longitude
-        )
-        
+    osrm_start = time.time()
+    
+    # Use ThreadPoolExecutor for concurrent OSRM requests
+    driving_results = _fetch_driving_distances_parallel(user_lat, user_lng, candidates)
+    
+    for resort, driving_info in driving_results:
         if driving_info:
             driving_miles = driving_info['distance_miles']
             driving_hours = driving_info['duration_hours']
@@ -123,6 +230,10 @@ def filter_resorts_by_distance(
                     'driving_hours': None,  # Unknown
                     'snow_quality': snow_quality,
                 })
+    
+    osrm_total_ms = round((time.time() - osrm_start) * 1000)
+    avg_ms = round(osrm_total_ms / _osrm_stats['calls']) if _osrm_stats['calls'] > 0 else 0
+    logger.warning(f"OSRM TIMING: {_osrm_stats['calls']} calls, {osrm_total_ms}ms total (parallel), ~{avg_ms}ms avg per call")
     
     if not results:
         return results
@@ -284,6 +395,10 @@ def get_driving_route(
     Returns:
         Dict with 'distance_miles' and 'duration_hours', or None on error
     """
+    global _osrm_stats
+    _osrm_stats['calls'] += 1
+    call_start = time.time()
+    
     # OSRM expects coordinates as lng,lat
     url = f"{OSRM_URL}/route/v1/driving/{start_lng},{start_lat};{end_lng},{end_lat}"
     
@@ -294,6 +409,9 @@ def get_driving_route(
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
+        
+        call_time = round((time.time() - call_start) * 1000)
+        _osrm_stats['total_time_ms'] += call_time
         
         data = response.json()
         
@@ -315,6 +433,8 @@ def get_driving_route(
         return None
         
     except requests.RequestException as e:
+        call_time = round((time.time() - call_start) * 1000)
+        _osrm_stats['total_time_ms'] += call_time
         logger.error(f"OSRM request failed: {e}")
         return None
     except (KeyError, ValueError, IndexError) as e:
