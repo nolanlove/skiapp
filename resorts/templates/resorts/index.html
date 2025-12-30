@@ -371,18 +371,14 @@
         
         // Get marker color based on snow quality score
         function getSnowQualityColor(snowScore) {
-            // snowScore is 0-100
-            // Map to a gradient from black (low) to pure white (high)
-            // Using aggressive "hockey stick" curve: only top scores appear white
+            // snowScore is 0-100 (absolute scale)
+            // Map to a gradient from dark gray (low) to pure white (high)
+            // Linear mapping so 50 score = 50% brightness
             const t = Math.max(0, Math.min(100, snowScore)) / 100;
             
-            // Apply aggressive hockey stick curve: t^4 makes most scores dark
-            // Only 90+ scores start getting really white
-            const curved = Math.pow(t, 4);
-            
-            // Black (low): hsl(0, 0%, 10%) - darker base
+            // Dark gray (low): hsl(0, 0%, 20%)
             // White (high): hsl(0, 0%, 100%)
-            const light = 10 + (90 * curved); // 10% -> 100%
+            const light = 20 + (80 * t); // 20% -> 100%
             
             return `hsl(0, 0%, ${light}%)`;
         }
