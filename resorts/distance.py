@@ -4,7 +4,6 @@ Distance calculation utilities including Haversine formula and OSRM routing.
 import logging
 import math
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any, Tuple
 
 import requests
@@ -19,9 +18,6 @@ _osrm_stats = {'calls': 0, 'total_time_ms': 0}
 # OSRM public demo server (for development/testing)
 # For production, consider self-hosting or using a paid service
 OSRM_URL = "https://router.project-osrm.org"
-
-# Max concurrent OSRM requests (be respectful to the public server)
-MAX_OSRM_WORKERS = 10
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -52,71 +48,45 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     return R * c
 
 
-def _fetch_driving_distances_parallel(
+def _fetch_driving_distances_batch(
     user_lat: float,
     user_lng: float,
     candidates: List[Resort]
 ) -> List[Tuple[Resort, Optional[Dict[str, float]]]]:
     """
-    Fetch driving distances for all candidates in parallel using ThreadPoolExecutor.
+    Fetch driving distances for all candidates using OSRM Table API.
+    This makes a SINGLE request for all destinations, dramatically faster.
     
     Returns:
         List of (resort, driving_info) tuples
     """
-    results = []
-    
-    # Use a session for connection pooling
-    session = requests.Session()
-    
-    def fetch_one(resort: Resort) -> Tuple[Resort, Optional[Dict[str, float]]]:
-        """Fetch driving info for a single resort."""
-        driving_info = _get_driving_route_with_session(
-            session,
-            user_lat, user_lng,
-            resort.latitude, resort.longitude
-        )
-        return (resort, driving_info)
-    
-    # Execute all requests in parallel
-    with ThreadPoolExecutor(max_workers=MAX_OSRM_WORKERS) as executor:
-        futures = {executor.submit(fetch_one, resort): resort for resort in candidates}
-        
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                resort = futures[future]
-                logger.error(f"Error fetching route for {resort.name}: {e}")
-                results.append((resort, None))
-    
-    session.close()
-    return results
-
-
-def _get_driving_route_with_session(
-    session: requests.Session,
-    start_lat: float,
-    start_lng: float,
-    end_lat: float,
-    end_lng: float
-) -> Optional[Dict[str, float]]:
-    """
-    Get driving route from OSRM using a shared session.
-    """
     global _osrm_stats
+    
+    if not candidates:
+        return []
+    
+    # Build coordinates string: origin;dest1;dest2;...
+    # OSRM expects lng,lat format
+    coords_parts = [f"{user_lng},{user_lat}"]  # Origin is index 0
+    for resort in candidates:
+        coords_parts.append(f"{resort.longitude},{resort.latitude}")
+    
+    coords_str = ";".join(coords_parts)
+    
+    # OSRM Table API - get distances from origin (index 0) to all destinations
+    url = f"{OSRM_URL}/table/v1/driving/{coords_str}"
+    
+    params = {
+        'sources': '0',  # Only calculate from origin (index 0)
+        'annotations': 'distance,duration',  # Get both distance and duration
+    }
+    
     _osrm_stats['calls'] += 1
     call_start = time.time()
     
-    # OSRM expects coordinates as lng,lat
-    url = f"{OSRM_URL}/route/v1/driving/{start_lng},{start_lat};{end_lng},{end_lat}"
-    
-    params = {
-        'overview': 'false',
-    }
-    
     try:
-        response = session.get(url, params=params, timeout=10)
+        # Use short connect timeout (3s), longer read timeout (15s)
+        response = requests.get(url, params=params, timeout=(3, 15))
         response.raise_for_status()
         
         call_time = round((time.time() - call_start) * 1000)
@@ -124,26 +94,43 @@ def _get_driving_route_with_session(
         
         data = response.json()
         
-        if data.get('code') == 'Ok' and data.get('routes'):
-            route = data['routes'][0]
-            distance_miles = route['distance'] / 1609.344
-            duration_hours = route['duration'] / 3600
-            
-            return {
-                'distance_miles': round(distance_miles, 1),
-                'duration_hours': round(duration_hours, 2),
-            }
+        if data.get('code') != 'Ok':
+            logger.warning(f"OSRM Table API error: {data.get('code')}")
+            return [(resort, None) for resort in candidates]
         
-        return None
+        # Extract distances and durations
+        # distances[0] = row from origin to all destinations
+        # durations[0] = row from origin to all destinations
+        distances = data.get('distances', [[]])[0]  # First (only) source row
+        durations = data.get('durations', [[]])[0]  # First (only) source row
+        
+        results = []
+        for i, resort in enumerate(candidates):
+            # Index i+1 because index 0 is the origin itself
+            dest_idx = i + 1
+            
+            if dest_idx < len(distances) and distances[dest_idx] is not None:
+                distance_miles = distances[dest_idx] / 1609.344
+                duration_hours = durations[dest_idx] / 3600 if durations[dest_idx] else None
+                
+                results.append((resort, {
+                    'distance_miles': round(distance_miles, 1),
+                    'duration_hours': round(duration_hours, 2) if duration_hours else None,
+                }))
+            else:
+                results.append((resort, None))
+        
+        logger.info(f"OSRM Table API: fetched {len(candidates)} distances in {call_time}ms")
+        return results
         
     except requests.RequestException as e:
         call_time = round((time.time() - call_start) * 1000)
         _osrm_stats['total_time_ms'] += call_time
-        logger.error(f"OSRM request failed: {e}")
-        return None
+        logger.error(f"OSRM Table API request failed: {e}")
+        return [(resort, None) for resort in candidates]
     except (KeyError, ValueError, IndexError) as e:
-        logger.error(f"Error parsing OSRM response: {e}")
-        return None
+        logger.error(f"Error parsing OSRM Table API response: {e}")
+        return [(resort, None) for resort in candidates]
 
 
 def filter_resorts_by_distance(
@@ -195,12 +182,12 @@ def filter_resorts_by_distance(
     
     logger.info(f"OSRM: Pre-filter found {len(candidates)} candidates within {max_distance * 1.5:.0f}mi straight-line")
     
-    # Second pass: get actual driving distances IN PARALLEL
+    # Second pass: get actual driving distances using OSRM Table API (single request)
     results = []
     osrm_start = time.time()
     
-    # Use ThreadPoolExecutor for concurrent OSRM requests
-    driving_results = _fetch_driving_distances_parallel(user_lat, user_lng, candidates)
+    # Use OSRM Table API to get all distances in one request
+    driving_results = _fetch_driving_distances_batch(user_lat, user_lng, candidates)
     
     for resort, driving_info in driving_results:
         if driving_info:
