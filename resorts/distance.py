@@ -225,15 +225,16 @@ def filter_resorts_by_distance(
     if not results:
         return results
     
-    # Calculate normalized scores for 2D optimization
+    # Calculate scores for 2D optimization
+    # Snow quality is already on 0-100 scale (absolute)
+    # Distance score: convert to 0-1 scale where closer = higher score
     max_dist = max(r['distance'] for r in results) or 1
-    max_quality = max(r['snow_quality'] for r in results) or 1
     
     for r in results:
         # Normalize distance: 0 = far (bad), 1 = near (good)
         r['distance_score'] = 1 - (r['distance'] / max_dist)
-        # Normalize snow quality: 0 = bad, 1 = good (already normalized)
-        r['quality_score'] = r['snow_quality'] / max_quality
+        # Snow quality is already 0-100 absolute scale, convert to 0-1
+        r['quality_score'] = r['snow_quality'] / 100
         # Combined 2D optimization score (higher is better)
         r['combined_score'] = _calculate_2d_score(
             r['distance_score'], 
