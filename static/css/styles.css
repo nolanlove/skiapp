@@ -1,0 +1,94 @@
+/* Custom styles for SkiSpotter */
+
+/* Map container */
+#map {
+    height: 500px;
+    width: 100%;
+    border-radius: 0.75rem;
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
+
+/* Custom Leaflet popup styling */
+.leaflet-popup-content-wrapper {
+    border-radius: 0.5rem;
+    padding: 0;
+}
+
+.leaflet-popup-content {
+    margin: 0;
+    min-width: 200px;
+}
+
+.resort-popup {
+    padding: 0.75rem;
+}
+
+.resort-popup h3 {
+    font-weight: 600;
+    font-size: 1rem;
+    margin-bottom: 0.5rem;
+    color: #1e293b;
+}
+
+.resort-popup .conditions {
+    font-size: 0.875rem;
+    color: #475569;
+    margin-bottom: 0.25rem;
+}
+
+.resort-popup .distance {
+    font-size: 0.75rem;
+    color: #64748b;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #e2e8f0;
+}
+
+/* Loading spinner */
+.spinner {
+    border: 3px solid #e2e8f0;
+    border-top: 3px solid #3b82f6;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Results cards */
+.resort-card {
+    transition: all 0.2s ease-in-out;
+}
+
+.resort-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+/* Snow condition badge */
+.snow-badge {
+    background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);
+    color: white;
+    padding: 0.25rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.snow-badge.fresh {
+    background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+}
+
+/* Status indicators */
+.status-open {
+    color: #10b981;
+}
+
+.status-closed {
+    color: #ef4444;
+}
+
