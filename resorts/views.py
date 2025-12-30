@@ -78,8 +78,8 @@ def search_resorts(request):
     timings['filter_distance_ms'] = round((time.time() - t0) * 1000)
     timings['candidates_after_filter'] = len(nearby)
     
-    # Take top 10
-    top_resorts = nearby[:10]
+    # Return all resorts within the radius
+    top_resorts = nearby
     
     # Format response
     t0 = time.time()
